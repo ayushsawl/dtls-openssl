@@ -15,6 +15,7 @@
 #include <errno.h>
 
 #include "bio_local.h"
+#include "internal/ktls.h"
 #ifndef OPENSSL_NO_DGRAM
 
 # ifndef OPENSSL_NO_SCTP
@@ -109,6 +110,7 @@ typedef struct bio_dgram_data_st {
     struct timeval next_timeout;
     struct timeval socket_timeout;
     unsigned int peekmode;
+    unsigned char record_type;
 } bio_dgram_data;
 
 # ifndef OPENSSL_NO_SCTP
@@ -324,15 +326,62 @@ static int dgram_read(BIO *b, char *out, int outl)
     return ret;
 }
 
+static ossl_inline int ktls_send_ctrl_message_dtls(int fd,
+				unsigned char record_type, const void *data, size_t length,
+				BIO *b)
+{
+    struct msghdr msg;
+    int cmsg_len = sizeof(record_type);
+    struct cmsghdr *cmsg;
+    union {
+        struct cmsghdr hdr;
+        char buf[CMSG_SPACE(sizeof(unsigned char))];
+    } cmsgbuf;
+    struct iovec msg_iov;       /* Vector of data to send/receive into */
+    bio_dgram_data *addr = (bio_dgram_data *)b->ptr;
+
+    memset(&msg, 0, sizeof(msg));
+	if (BIO_ADDR_family(&addr->peer) == AF_INET) {
+	    msg.msg_name = &addr->peer.s_in;
+		msg.msg_namelen = sizeof(addr->peer.s_in);
+	} else {
+	    msg.msg_name = &addr->peer.s_in6;
+		msg.msg_namelen = sizeof(addr->peer.s_in6);
+	}
+    msg.msg_control = cmsgbuf.buf;
+    msg.msg_controllen = sizeof(cmsgbuf.buf);
+    cmsg = CMSG_FIRSTHDR(&msg);
+    cmsg->cmsg_level = SOL_TLS;
+    cmsg->cmsg_type = TLS_SET_RECORD_TYPE;
+    cmsg->cmsg_len = CMSG_LEN(cmsg_len);
+    *((unsigned char *)CMSG_DATA(cmsg)) = record_type;
+    msg.msg_controllen = cmsg->cmsg_len;
+
+    msg_iov.iov_base = (void *)data;
+    msg_iov.iov_len = length;
+    msg.msg_iov = &msg_iov;
+    msg.msg_iovlen = 1;
+
+    return sendmsg(fd, &msg, 0);
+}
+
 static int dgram_write(BIO *b, const char *in, int inl)
 {
     int ret;
     bio_dgram_data *data = (bio_dgram_data *)b->ptr;
     clear_socket_error();
 
-    if (data->connected)
+    if (BIO_should_ktls_ctrl_msg_flag(b)) {
+		unsigned char record_type = data->record_type;
+        ret = ktls_send_ctrl_message_dtls(b->num, record_type, in, inl, b);
+
+        if (ret >= 0) {
+            ret = inl;
+            BIO_clear_ktls_ctrl_msg_flag(b);
+        }
+    } else if (data->connected) {
         ret = writesocket(b->num, in, inl);
-    else {
+    } else {
         int peerlen = BIO_ADDR_sockaddr_size(&data->peer);
 
         ret = sendto(b->num, in, inl, 0,
@@ -402,6 +451,9 @@ static long dgram_ctrl(BIO *b, int cmd, long num, void *ptr)
     BIO_ADDR addr;
 # endif
 
+# ifndef OPENSSL_NO_KTLS
+    ktls_crypto_info_t *crypto_info;
+# endif
     data = (bio_dgram_data *)b->ptr;
 
     switch (cmd) {
@@ -441,6 +493,27 @@ static long dgram_ctrl(BIO *b, int cmd, long num, void *ptr)
     case BIO_CTRL_FLUSH:
         ret = 1;
         break;
+# ifndef OPENSSL_NO_KTLS
+    case BIO_CTRL_SET_KTLS:
+        crypto_info = (ktls_crypto_info_t *)ptr;
+        ret = ktls_start(b->num, crypto_info, num);
+        if (ret)
+            BIO_set_ktls_flag(b, num);
+        break;
+    case BIO_CTRL_GET_KTLS_SEND:
+        return BIO_should_ktls_flag(b, 1) != 0;
+    case BIO_CTRL_GET_KTLS_RECV:
+        return BIO_should_ktls_flag(b, 0) != 0;
+    case BIO_CTRL_SET_KTLS_TX_SEND_CTRL_MSG:
+        BIO_set_ktls_ctrl_msg_flag(b);
+        data->record_type = (unsigned char)num;
+        ret = 0;
+        break;
+    case BIO_CTRL_CLEAR_KTLS_TX_CTRL_MSG:
+        BIO_clear_ktls_ctrl_msg_flag(b);
+        ret = 0;
+        break;
+# endif
     case BIO_CTRL_DGRAM_CONNECT:
         BIO_ADDR_make(&data->peer, BIO_ADDR_sockaddr((BIO_ADDR *)ptr));
         break;

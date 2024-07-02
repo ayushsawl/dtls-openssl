@@ -1553,6 +1553,11 @@ int dtls1_process_record(SSL *s, DTLS1_BITMAP *bitmap)
     rr->data = rr->input;
     rr->orig_len = rr->length;
 
+    if(BIO_get_ktls_recv(s->rbio)) {
+        if (rr->type == SSL3_RT_APPLICATION_DATA || rr->type == SSL3_RT_ALERT)
+			goto skip_dec;
+    }
+
     if (s->read_hash != NULL) {
         const EVP_MD *tmpmd = EVP_MD_CTX_get0_md(s->read_hash);
 
@@ -1677,6 +1682,7 @@ int dtls1_process_record(SSL *s, DTLS1_BITMAP *bitmap)
     /* we have pulled in a full packet so zero things */
     RECORD_LAYER_reset_packet_length(&s->rlayer);
 
+skip_dec:
     /* Mark receipt of record. */
     dtls1_record_bitmap_update(s, bitmap);
 

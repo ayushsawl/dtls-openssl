@@ -28,6 +28,7 @@ int ktls_check_supported_cipher(const SSL *s, const EVP_CIPHER *c,
     case TLS1_1_VERSION:
     case TLS1_2_VERSION:
     case TLS1_3_VERSION:
+    case DTLS1_2_VERSION:
         break;
     default:
         return 0;
@@ -124,6 +125,7 @@ int ktls_check_supported_cipher(const SSL *s, const EVP_CIPHER *c,
     switch (s->version) {
     case TLS1_2_VERSION:
     case TLS1_3_VERSION:
+    case DTLS1_2_VERSION:
         break;
     default:
         return 0;

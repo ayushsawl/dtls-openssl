@@ -1192,7 +1192,10 @@ int ssl3_write_pending(SSL *s, int type, const unsigned char *buf, size_t len,
                 i = BIO_flush(s->wbio);
                 if (i <= 0)
                     return i;
-                BIO_set_ktls_ctrl_msg(s->wbio, type);
+				/* TODO: Need to send record type in cmsg to driver, driver
+				 * will use record type in cpl_sfo.
+				 */
+				BIO_set_ktls_ctrl_msg(s->wbio, type);
             }
             i = BIO_write(s->wbio, (char *)
                           &(SSL3_BUFFER_get_buf(&wb[currbuf])

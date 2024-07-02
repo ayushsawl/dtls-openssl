@@ -118,8 +118,13 @@ static int count_unprocessed_records(SSL *s)
 
     while (PACKET_remaining(&pkt) > 0) {
         /* Skip record type and version */
-        if (!PACKET_forward(&pkt, 3))
-            return -1;
+        if (s->version == DTLS1_2_VERSION) {
+            if (!PACKET_forward(&pkt, 11))
+                return -1;
+        } else {
+            if (!PACKET_forward(&pkt, 3))
+                return -1;
+        }
 
         /* Read until next record */
         if (!PACKET_get_length_prefixed_2(&pkt, &subpkt))

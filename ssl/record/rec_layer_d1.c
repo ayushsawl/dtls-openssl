@@ -844,6 +844,18 @@ int do_dtls1_write(SSL *s, int type, const unsigned char *buf,
             return -1;
         }
     }
+	/* For DTLS case skip hdr creation, it will be created by hw */
+	if (BIO_get_ktls_send(s->wbio)) {
+		SSL3_BUFFER_set_buf(&s->rlayer.wbuf[0], (unsigned char *)buf);
+		SSL3_BUFFER_set_offset(&s->rlayer.wbuf[0], 0);
+		SSL3_BUFFER_set_app_buffer(&s->rlayer.wbuf[0], 1);
+		SSL3_RECORD_set_type(&wr, type);
+		SSL3_RECORD_set_rec_version(&wr, DTLS1_2_VERSION);
+		p = SSL3_BUFFER_get_buf(wb) + prefix_len;
+		pseq = NULL;
+		eivlen = 0;
+		goto wpacket_init_complete;
+   }
 
     p = SSL3_BUFFER_get_buf(wb) + prefix_len;
 
@@ -891,6 +903,7 @@ int do_dtls1_write(SSL *s, int type, const unsigned char *buf,
     } else
         eivlen = 0;
 
+wpacket_init_complete:
     /* lets setup the record stuff. */
     SSL3_RECORD_set_data(&wr, p + eivlen); /* make room for IV in case of CBC */
     SSL3_RECORD_set_length(&wr, len);
@@ -907,9 +920,13 @@ int do_dtls1_write(SSL *s, int type, const unsigned char *buf,
             return -1;
         }
     } else {
-        memcpy(SSL3_RECORD_get_data(&wr), SSL3_RECORD_get_input(&wr),
-               SSL3_RECORD_get_length(&wr));
-        SSL3_RECORD_reset_input(&wr);
+	    if (BIO_get_ktls_send(s->wbio)) {
+			SSL3_RECORD_reset_data(&wr);
+	    } else {
+			memcpy(SSL3_RECORD_get_data(&wr), SSL3_RECORD_get_input(&wr),
+					SSL3_RECORD_get_length(&wr));
+			SSL3_RECORD_reset_input(&wr);
+	    }
     }
 
     /*
@@ -918,7 +935,7 @@ int do_dtls1_write(SSL *s, int type, const unsigned char *buf,
      * wb->buf
      */
 
-    if (!SSL_WRITE_ETM(s) && mac_size != 0) {
+    if (!BIO_get_ktls_send(s->wbio) && !SSL_WRITE_ETM(s) && mac_size != 0) {
         if (!s->method->ssl3_enc->mac(s, &wr,
                                       &(p[SSL3_RECORD_get_length(&wr) + eivlen]),
                                       1)) {
@@ -935,14 +952,15 @@ int do_dtls1_write(SSL *s, int type, const unsigned char *buf,
     if (eivlen)
         SSL3_RECORD_add_length(&wr, eivlen);
 
-    if (s->method->ssl3_enc->enc(s, &wr, 1, 1, NULL, mac_size) < 1) {
+	/* Skipping encryption for DTLS */
+    if (!BIO_get_ktls_send(s->wbio) && s->method->ssl3_enc->enc(s, &wr, 1, 1, NULL, mac_size) < 1) {
         if (!ossl_statem_in_error(s)) {
             SSLfatal(s, SSL_AD_INTERNAL_ERROR, ERR_R_INTERNAL_ERROR);
         }
         return -1;
     }
 
-    if (SSL_WRITE_ETM(s) && mac_size != 0) {
+    if (!BIO_get_ktls_send(s->wbio) && SSL_WRITE_ETM(s) && mac_size != 0) {
         if (!s->method->ssl3_enc->mac(s, &wr,
                                       &(p[SSL3_RECORD_get_length(&wr)]), 1)) {
             SSLfatal(s, SSL_AD_INTERNAL_ERROR, ERR_R_INTERNAL_ERROR);
@@ -955,13 +973,15 @@ int do_dtls1_write(SSL *s, int type, const unsigned char *buf,
 
     /* there's only one epoch between handshake and app data */
 
-    s2n(s->rlayer.d->w_epoch, pseq);
+    if (!BIO_get_ktls_send(s->wbio)) {
+	    s2n(s->rlayer.d->w_epoch, pseq);
 
-    memcpy(pseq, &(s->rlayer.write_sequence[2]), 6);
-    pseq += 6;
-    s2n(SSL3_RECORD_get_length(&wr), pseq);
+	    memcpy(pseq, &(s->rlayer.write_sequence[2]), 6);
+	    pseq += 6;
+	    s2n(SSL3_RECORD_get_length(&wr), pseq);
+    }
 
-    if (s->msg_callback)
+    if (s->msg_callback && !BIO_get_ktls_send(s->wbio))
         s->msg_callback(1, 0, SSL3_RT_HEADER, pseq - DTLS1_RT_HEADER_LENGTH,
                         DTLS1_RT_HEADER_LENGTH, s, s->msg_callback_arg);
 
@@ -970,7 +990,8 @@ int do_dtls1_write(SSL *s, int type, const unsigned char *buf,
      * wr->length long
      */
     SSL3_RECORD_set_type(&wr, type); /* not needed but helps for debugging */
-    SSL3_RECORD_add_length(&wr, DTLS1_RT_HEADER_LENGTH);
+	if (!BIO_get_ktls_send(s->wbio))
+	    SSL3_RECORD_add_length(&wr, DTLS1_RT_HEADER_LENGTH);
 
     ssl3_record_sequence_update(&(s->rlayer.write_sequence[0]));
 
